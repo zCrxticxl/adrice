@@ -8,10 +8,13 @@
 #   ./adrice.sh apply NAME   apply profile non-interactively
 #   ./adrice.sh undo         undo last change
 #   ./adrice.sh export NAME  pack profile + themes + wallpaper as tar
-#   ./adrice.sh import FILE  import such a tar on another machine
+#   ./adrice.sh import FILE   import such a tar (FILE may be a URL)
+#   ./adrice.sh magic IMAGE   generate + apply a full theme from any image
+#   ./adrice.sh doctor        diagnose why theming might not work
 #   ./adrice.sh --help
 
-VERSION="2.1.0"
+VERSION="2.2.0"
+SELF_PATH=$(realpath "$0" 2>/dev/null || echo "$0")
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/adrice"
 PROFILE_DIR="$CONFIG_DIR/profiles"
 STATE_FILE="$CONFIG_DIR/state"
@@ -105,6 +108,17 @@ box_top(){ # box_top [TITLE]
   fi
 }
 box_row(){ printf '  %s│%s%s%s│%s\n' "$C_BRD" "$RST" "$(pad "${1:-}" "$W")" "$C_BRD" "$RST"; }
+box_wrap(){ # box_row with word wrap for long lines
+  local word out=""
+  [[ -z ${1// /} ]] && { box_row; return; }
+  for word in $1; do
+    if [[ -n $out ]] && (( $(plainlen "$out $word") > W - 4 )); then
+      box_row "  $out"; out="    $word"
+    elif [[ -z $out ]]; then out=$word
+    else out+=" $word"; fi
+  done
+  [[ -n $out ]] && box_row "  $out"
+}
 box_bot(){ printf '  %s╰%s╯%s\n' "$C_BRD" "$(rep '─' "$W")" "$RST"; }
 
 chip(){ printf '%s %s %s' "$C_SELBG$C_TXT" "$1" "$RST"; }
@@ -221,7 +235,7 @@ notify(){ # boxed message screen, %b-expanded, multiline; suppressed when QUIET=
   cls; header; setw
   box_top
   box_row
-  for l in "${lines[@]}"; do box_row "  $l"; done
+  for l in "${lines[@]}"; do box_wrap "$l"; done
   box_row
   box_bot
   printf '\n   %s %s%s%s\n' "$(chip 'any key')" "$MUT" "continue" "$RST"
@@ -404,7 +418,7 @@ gtk_pv(){ # extract real theme colors from gtk.css if readable
 SCHEME_NAMES=()
 scheme_pv(){ # fake terminal rendered in the actual scheme colors
   local C i strip="" r
-  read -r -a C <<< "${SCHEMES[${SCHEME_NAMES[$1]}]}"
+  read -r -a C <<< "${SCHEMES[${SCHEME_NAMES[$1]:-${SCHEME_NAMES[0]}}]}"
   local BG; BG=$'\e[48;2;'"$((16#${C[0]:0:2}));$((16#${C[0]:2:2}));$((16#${C[0]:4:2}))"$'m'
   local F R G Y B M
   F=$(fgc "${C[1]}"); R=$(fgc "${C[3]}"); G=$(fgc "${C[4]}")
@@ -545,19 +559,26 @@ CATALOG=(
   "Bibata ${MUT}Cursor${E39}|icons|tar|https://github.com/ful1e5/Bibata_Cursor/releases/latest/download/Bibata.tar.xz|"
   "Phinger ${MUT}Cursor${E39}|icons|tar|https://github.com/phisch/phinger-cursors/releases/latest/download/phinger-cursors-variants.tar.bz2|"
   "Capitaine ${MUT}Cursor${E39}|icons|copy|https://github.com/keeferrourke/capitaine-cursors|dist:capitaine-cursors"
+  "JetBrainsMono ${MUT}Nerd Font${E39}|fonts|zip|https://github.com/ryanoasis/nerd-fonts/releases/latest/download/JetBrainsMono.zip|JetBrainsMono"
+  "FiraCode ${MUT}Nerd Font${E39}|fonts|zip|https://github.com/ryanoasis/nerd-fonts/releases/latest/download/FiraCode.zip|FiraCode"
+  "Hack ${MUT}Nerd Font${E39}|fonts|zip|https://github.com/ryanoasis/nerd-fonts/releases/latest/download/Hack.zip|Hack"
+  "CaskaydiaCove ${MUT}Nerd Font${E39}|fonts|zip|https://github.com/ryanoasis/nerd-fonts/releases/latest/download/CascadiaCode.zip|CascadiaCode"
+  "Meslo ${MUT}Nerd Font${E39}|fonts|zip|https://github.com/ryanoasis/nerd-fonts/releases/latest/download/Meslo.zip|Meslo"
 )
 theme_install(){ # theme_install "CATALOG-LINE" [quiet]
   local label target method url arg
   IFS='|' read -r label target method url arg <<< "$1"
-  local tdir="$HOME/.themes"; [[ $target == icons ]] && tdir="$HOME/.icons"
+  local tdir="$HOME/.themes"
+  [[ $target == icons ]] && tdir="$HOME/.icons"
+  [[ $target == fonts ]] && tdir="$HOME/.local/share/fonts/$arg"
   mkdir -p "$tdir"
   local tmp out tok src name
   tmp=$(mktemp -d)
   working "downloading $(plain "$label") …"
   FB=""
-  if [[ $method != tar ]] && ! command -v git >/dev/null 2>&1; then
+  if [[ $method != tar && $method != zip ]] && ! command -v git >/dev/null 2>&1; then
     FB="${ERR}✗ git required${RST}"
-  elif [[ $method == tar ]] && ! command -v curl >/dev/null 2>&1; then
+  elif [[ $method == tar || $method == zip ]] && ! command -v curl >/dev/null 2>&1; then
     FB="${ERR}✗ curl required${RST}"
   else
     case $method in
@@ -591,9 +612,15 @@ theme_install(){ # theme_install "CATALOG-LINE" [quiet]
         out=$(curl -fsSL "$url" -o "$tmp/pkg" 2>&1) \
           || FB="${ERR}✗ download failed${RST}\n${MUT}$(tail -1 <<<"$out")${E39}"
         [[ -z $FB ]] && { tar -xf "$tmp/pkg" -C "$tdir" 2>/dev/null || FB="${ERR}✗ extract failed${RST}"; } ;;
+      zip)
+        command -v unzip >/dev/null 2>&1 || FB="${ERR}✗ unzip required${RST}"
+        [[ -z $FB ]] && { out=$(curl -fsSL "$url" -o "$tmp/pkg.zip" 2>&1) \
+          || FB="${ERR}✗ download failed${RST}\n${MUT}$(tail -1 <<<"$out")${E39}"; }
+        [[ -z $FB ]] && { unzip -oq "$tmp/pkg.zip" -d "$tdir" 2>/dev/null || FB="${ERR}✗ extract failed${RST}"; } ;;
     esac
   fi
   rm -rf "$tmp"
+  [[ $target == fonts && -z $FB ]] && fc-cache -f "$tdir" >/dev/null 2>&1
   [[ -z $FB ]] && FB="${OK}✓ $(plain "$label") installed → ${tdir/#$HOME/\~}${RST}"
   [[ -z ${2:-} ]] && notify "$FB"
   [[ $FB == *✓* ]]
@@ -602,7 +629,7 @@ themes_menu(){
   while :; do
     local labels=() c
     for c in "${CATALOG[@]}"; do labels+=("${c%%|*}"); done
-    menu "Get themes" "curated packs, downloaded from GitHub → ~/.themes / ~/.icons" "${labels[@]}" || return
+    menu "Get themes & fonts" "curated packs from GitHub → ~/.themes · ~/.icons · fonts" "${labels[@]}" || return
     local keep=$MENU_IDX
     theme_install "${CATALOG[MENU_IDX]}"
     MENU_START=$keep
@@ -657,9 +684,11 @@ preset_menu(){
       sw=""; for i in 3 4 5 6 7 8; do sw+="$(fgc "${C[i]}")██"; done
       labels+=("$(pad "$n" 14) ${sw}${E39}")
     done
+    labels=("⚄ Random rice ${MUT}shuffle installed themes${E39}" "${labels[@]}")
     menu "Rice presets" "one shot: GTK + icons + cursor + terminal + accent — downloads what's missing" "${labels[@]}" || return
     local keep=$MENU_IDX
-    preset_apply "${PRESETS[MENU_IDX]}"
+    if (( MENU_IDX == 0 )); then random_rice
+    else preset_apply "${PRESETS[MENU_IDX-1]}"; fi
     MENU_START=$keep
   done
 }
@@ -823,15 +852,20 @@ profile_export(){ # NAME → prints tar path
   rm -rf "$tmp"
   echo "$out"
 }
-profile_import(){ # FILE → prints profile name
-  local a=$1
+profile_import(){ # FILE or URL → prints profile name
+  local a=$1 orig=$1
+  if [[ $a == http://* || $a == https://* ]]; then
+    local dl; dl=$(mktemp --suffix=.tar.gz)
+    curl -fsSL "$a" -o "$dl" 2>/dev/null || { echo "download failed: $a" >&2; return 1; }
+    a=$dl
+  fi
   [[ -f $a ]] || { echo "file not found: $a" >&2; return 1; }
   local tmp name wp
   tmp=$(mktemp -d)
   tar -xzf "$a" -C "$tmp" 2>/dev/null && [[ -f $tmp/rice/profile ]] \
     || { echo "not a adrice export" >&2; rm -rf "$tmp"; return 1; }
-  name=$(basename "$a"); name=${name#adrice-}; name=${name%.tar.gz}
-  [[ -n $name && $name != "$(basename "$a")" ]] || name=imported
+  name=$(basename "${orig%%\?*}"); name=${name#adrice-}; name=${name%.tar.gz}
+  [[ -n $name && $name != "$(basename "${orig%%\?*}")" ]] || name=imported
   mkdir -p "$HOME/.themes" "$HOME/.icons" "$CONFIG_DIR/wallpapers"
   cp -rn "$tmp"/rice/themes/. "$HOME/.themes/" 2>/dev/null
   cp -rn "$tmp"/rice/icons/. "$HOME/.icons/" 2>/dev/null
@@ -843,6 +877,499 @@ profile_import(){ # FILE → prints profile name
   cp "$tmp/rice/profile" "$PROFILE_DIR/$name.profile"
   rm -rf "$tmp"
   echo "$name"
+}
+
+# ══════════════════════════ color math ══════════════════════════
+lum(){ local r=$((16#${1:0:2})) g=$((16#${1:2:2})) b=$((16#${1:4:2})); echo $(( (2*r + 3*g + b) / 6 )); }
+sat(){
+  local r=$((16#${1:0:2})) g=$((16#${1:2:2})) b=$((16#${1:4:2}))
+  local mx=$r mn=$r
+  (( g > mx )) && mx=$g; (( b > mx )) && mx=$b
+  (( g < mn )) && mn=$g; (( b < mn )) && mn=$b
+  echo $(( mx - mn ))
+}
+hue(){ # 0..359
+  local r=$((16#${1:0:2})) g=$((16#${1:2:2})) b=$((16#${1:4:2}))
+  local mx=$r mn=$r h
+  (( g > mx )) && mx=$g; (( b > mx )) && mx=$b
+  (( g < mn )) && mn=$g; (( b < mn )) && mn=$b
+  local d=$(( mx - mn )); (( d == 0 )) && { echo 0; return; }
+  if (( mx == r )); then h=$(( (60 * (g - b) / d + 360) % 360 ))
+  elif (( mx == g )); then h=$(( 60 * (b - r) / d + 120 ))
+  else h=$(( 60 * (r - g) / d + 240 )); fi
+  echo $h
+}
+lighten(){ # HEX PCT
+  local r=$((16#${1:0:2})) g=$((16#${1:2:2})) b=$((16#${1:4:2})) p=$2
+  printf '%02x%02x%02x' $(( r + (255-r)*p/100 )) $(( g + (255-g)*p/100 )) $(( b + (255-b)*p/100 ))
+}
+darken(){ # HEX PCT
+  local r=$((16#${1:0:2})) g=$((16#${1:2:2})) b=$((16#${1:4:2})) p=$2
+  printf '%02x%02x%02x' $(( r*(100-p)/100 )) $(( g*(100-p)/100 )) $(( b*(100-p)/100 ))
+}
+nearest_accent(){ # HEX → gnome accent name
+  (( $(sat "$1") < 25 )) && { echo slate; return; }
+  local h; h=$(hue "$1")
+  if   (( h < 20 || h >= 340 )); then echo red
+  elif (( h < 45 ));  then echo orange
+  elif (( h < 70 ));  then echo yellow
+  elif (( h < 160 )); then echo green
+  elif (( h < 200 )); then echo teal
+  elif (( h < 260 )); then echo blue
+  elif (( h < 290 )); then echo purple
+  else echo pink; fi
+}
+
+# ══════════════════════════ wallpaper magic (pywal-style) ══════════════════════════
+WALLGEN_ACCENT=blue WALLGEN_PRIMARY=89b4fa
+wallgen_build(){ # IMAGE → SCHEMES[wallpaper-gen] + persisted; 1 on failure
+  local img=$1 im
+  if command -v magick >/dev/null 2>&1; then im=magick
+  elif command -v convert >/dev/null 2>&1; then im=convert
+  else FB="${ERR}✗ imagemagick required${RST}\n${MUT}install: sudo apt install imagemagick / pacman -S imagemagick${E39}"; return 1; fi
+  [[ -f $img ]] || { FB="${ERR}✗ file not found${RST}"; return 1; }
+  local colors=() line hex
+  while IFS= read -r line; do
+    hex=$(grep -oE '#[0-9A-Fa-f]{6}' <<< "$line" | head -1); hex=${hex#\#}; hex=${hex,,}
+    [[ -n $hex ]] && colors+=("$hex")
+  done < <($im "$img" -resize 10% -depth 8 -colors 24 -format %c histogram:info:- 2>/dev/null | sort -rn)
+  (( ${#colors[@]} >= 4 )) || { FB="${ERR}✗ color extraction failed${RST}"; return 1; }
+  # bg = darkest, fg = lightest (forced into readable range)
+  local bg="" fg="" c l minl=999 maxl=-1
+  for c in "${colors[@]}"; do
+    l=$(lum "$c")
+    (( l < minl )) && { minl=$l; bg=$c; }
+    (( l > maxl )) && { maxl=$l; fg=$c; }
+  done
+  (( minl > 45 ))  && bg=$(darken "$bg" 60)
+  (( maxl < 170 )) && fg=$(lighten "$fg" 55)
+  # vibrant candidates
+  local vib=()
+  for c in "${colors[@]}"; do (( $(sat "$c") >= 25 )) && vib+=("$c"); done
+  (( ${#vib[@]} )) || vib=("$(lighten "$fg" 10)")
+  # most saturated = primary (accent, hyprland border)
+  local best=${vib[0]} bs=0 s
+  for c in "${vib[@]}"; do s=$(sat "$c"); (( s > bs )) && { bs=$s; best=$c; }; done
+  WALLGEN_PRIMARY=$best
+  WALLGEN_ACCENT=$(nearest_accent "$best")
+  # fill 6 ansi slots (red green yellow blue magenta cyan) by nearest hue
+  local targets=(0 120 60 240 300 180) slots=() t bd d h cand pick
+  for t in "${targets[@]}"; do
+    pick=${vib[0]}; bd=999
+    for cand in "${vib[@]}"; do
+      h=$(hue "$cand"); d=$(( h > t ? h - t : t - h )); (( d > 180 )) && d=$(( 360 - d ))
+      (( d < bd )) && { bd=$d; pick=$cand; }
+    done
+    l=$(lum "$pick")
+    (( l < 90 ))  && pick=$(lighten "$pick" 35)
+    (( l > 200 )) && pick=$(darken "$pick" 20)
+    slots+=("$pick")
+  done
+  local pal=("$(lighten "$bg" 12)" "${slots[0]}" "${slots[1]}" "${slots[2]}" "${slots[3]}" "${slots[4]}" "${slots[5]}" "$(darken "$fg" 12)")
+  local i br=()
+  for i in {0..7}; do br+=("$(lighten "${pal[i]}" 20)"); done
+  SCHEMES[wallpaper-gen]="$bg $fg ${pal[*]} ${br[*]}"
+  printf '%s\n' "${SCHEMES[wallpaper-gen]}" > "$CONFIG_DIR/wallgen.scheme"
+  return 0
+}
+magic_apply_full(){ # IMAGE — wallpaper + terminals + dark + accent (+ hypr border)
+  local img=$1 QUIET=1
+  set_wallpaper "$img"
+  apply_term_scheme wallpaper-gen
+  set_color_scheme dark
+  set_accent "$WALLGEN_ACCENT"
+  [[ $DE == hyprland ]] && hypr_apply "general:col.active_border" "rgb($WALLGEN_PRIMARY)"
+  QUIET=0
+}
+magic_menu(){
+  local paths=() labels=() p lab img
+  while IFS= read -r p; do
+    paths+=("$p")
+    lab=${p/#$HOME/\~}; (( ${#lab} > 46 )) && lab="…${lab: -45}"
+    labels+=("$lab")
+  done < <(list_wallpapers)
+  labels=("✎ enter path manually" "${labels[@]}")
+  WALL_PATHS=("" "${paths[@]}")
+  local pvh=3; command -v chafa >/dev/null 2>&1 && pvh=12
+  PV_FN=wall_pv PV_H=$pvh menu "Wallpaper magic" "pick an image — a full color theme gets generated from it" "${labels[@]}" || return
+  if (( MENU_IDX == 0 )); then
+    ask "image path:" "" || return; img=$REPLY
+  else
+    img=${WALL_PATHS[MENU_IDX]}
+  fi
+  working "extracting colors from $(basename "$img") …"
+  wallgen_build "$img" || { notify "$FB"; return; }
+  SCHEME_NAMES=(wallpaper-gen wallpaper-gen)
+  PV_FN=scheme_pv PV_H=6 menu "Generated theme" "from $(basename "$img") · accent: $WALLGEN_ACCENT" \
+    "Apply full ${MUT}wallpaper + terminals + dark + accent${E39}" \
+    "Apply terminal scheme only" || return
+  local old; old=$(state_get term_scheme)
+  if (( MENU_IDX == 0 )); then
+    magic_apply_full "$img"
+    log_change term_scheme "$old" "wallpaper-gen"
+    notify "${OK}✓ full theme generated & applied${RST}\n${MUT}accent $WALLGEN_ACCENT · dark mode · all terminals · wallpaper set${E39}\n${MUT}restart terminals to see the colors${E39}"
+  else
+    local QUIET=1; apply_term_scheme wallpaper-gen; QUIET=0
+    log_change term_scheme "$old" "wallpaper-gen"
+    notify "${OK}✓ terminal scheme applied${RST}\n${MUT}restart terminals to see it${E39}"
+  fi
+}
+
+# ══════════════════════════ flatpak theme sync ══════════════════════════
+flatpak_sync(){
+  command -v flatpak >/dev/null 2>&1 \
+    || { notify "${WARN}⚠ flatpak not installed — nothing to sync${RST}"; return; }
+  working "granting flatpak apps access to your themes …"
+  flatpak override --user \
+    --filesystem="$HOME/.themes:ro" --filesystem="$HOME/.icons:ro" \
+    --filesystem=xdg-config/gtk-3.0:ro --filesystem=xdg-config/gtk-4.0:ro 2>/dev/null
+  local t ic
+  t=$(current_of gtk);   [[ -n $t ]]  && flatpak override --user --env=GTK_THEME="$t" 2>/dev/null
+  ic=$(current_of icons); [[ -n $ic ]] && flatpak override --user --env=ICON_THEME="$ic" 2>/dev/null
+  notify "${OK}✓ flatpak apps now follow your rice${RST}\n${MUT}gtk: ${t:-—} · icons: ${ic:-—}${E39}\n${MUT}restart open flatpak apps to see it${E39}"
+}
+
+# ══════════════════════════ auto day / night (systemd user timers) ══════════════════════════
+autotheme_setup(){
+  command -v systemctl >/dev/null 2>&1 || { notify "${WARN}⚠ systemd required${RST}"; return; }
+  local profs=() p
+  while IFS= read -r p; do profs+=("${p%.profile}"); done \
+    < <(find "$PROFILE_DIR" -maxdepth 1 -name '*.profile' -printf '%f\n' 2>/dev/null | sort)
+  (( ${#profs[@]} >= 2 )) || { notify "${WARN}⚠ save at least 2 profiles first (a light + a dark one)${RST}"; return; }
+  menu "Day profile" "applied every morning" "${profs[@]}" || return
+  local dayp=${profs[MENU_IDX]}
+  menu "Night profile" "applied every evening" "${profs[@]}" || return
+  local nightp=${profs[MENU_IDX]}
+  ask "day starts at (HH:MM):" "07:00" || return; local dayt=$REPLY
+  ask "night starts at (HH:MM):" "19:00" || return; local nightt=$REPLY
+  local ud="$HOME/.config/systemd/user" n prof tm
+  mkdir -p "$ud"
+  for n in day night; do
+    if [[ $n == day ]]; then prof=$dayp tm=$dayt; else prof=$nightp tm=$nightt; fi
+    cat > "$ud/adrice-$n.service" <<EOF
+[Unit]
+Description=adrice: switch to $n profile ($prof)
+
+[Service]
+Type=oneshot
+ExecStart=$SELF_PATH apply $prof
+EOF
+    cat > "$ud/adrice-$n.timer" <<EOF
+[Unit]
+Description=adrice $n switch
+
+[Timer]
+OnCalendar=*-*-* $tm:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+  done
+  systemctl --user daemon-reload 2>/dev/null
+  systemctl --user enable --now adrice-day.timer adrice-night.timer >/dev/null 2>&1 \
+    && notify "${OK}✓ auto-theming active${RST}\n${MUT}$dayp at $dayt · $nightp at $nightt${E39}" \
+    || notify "${ERR}✗ could not enable timers${RST}\n${MUT}check: systemctl --user status adrice-day.timer${E39}"
+}
+autotheme_menu(){
+  while :; do
+    menu "Auto day / night" "systemd user timers switch your profiles automatically" \
+      "Set up ${MUT}pick profiles + times${E39}" "Status" "Disable" || return
+    local keep=$MENU_IDX s
+    case $MENU_IDX in
+      0) autotheme_setup ;;
+      1) s=$(systemctl --user list-timers 'adrice-*' --no-pager 2>/dev/null | head -4)
+         notify "${MUT}${s:-no adrice timers active}${E39}" ;;
+      2) systemctl --user disable --now adrice-day.timer adrice-night.timer >/dev/null 2>&1
+         rm -f "$HOME/.config/systemd/user"/adrice-{day,night}.{timer,service}
+         systemctl --user daemon-reload 2>/dev/null
+         notify "${OK}✓ auto-theming disabled${RST}" ;;
+    esac
+    MENU_START=$keep
+  done
+}
+
+# ══════════════════════════ app sync (btop · cava · vscode · spicetify) ══════════════════════════
+appsync(){
+  local name; name=$(state_get term_scheme)
+  [[ -n $name && -n ${SCHEMES[$name]:-} ]] \
+    || { notify "${WARN}⚠ apply a terminal color scheme first${RST}\n${MUT}Terminal & Shell → Color scheme${E39}"; return; }
+  local C bg fg pal
+  read -r -a C <<< "${SCHEMES[$name]}"
+  bg=${C[0]}; fg=${C[1]}; pal=("${C[@]:2:16}")
+  local done_=() skipped=()
+
+  if command -v btop >/dev/null 2>&1; then
+    local bd="$HOME/.config/btop/themes"; mkdir -p "$bd"
+    {
+      echo "theme[main_bg]=\"#$bg\""
+      echo "theme[main_fg]=\"#$fg\""
+      echo "theme[title]=\"#$fg\""
+      echo "theme[hi_fg]=\"#${pal[4]}\""
+      echo "theme[selected_bg]=\"#${pal[0]}\""
+      echo "theme[selected_fg]=\"#${pal[4]}\""
+      echo "theme[inactive_fg]=\"#${pal[8]}\""
+      echo "theme[graph_text]=\"#$fg\""
+      echo "theme[proc_misc]=\"#${pal[2]}\""
+      echo "theme[cpu_box]=\"#${pal[4]}\""
+      echo "theme[mem_box]=\"#${pal[2]}\""
+      echo "theme[net_box]=\"#${pal[5]}\""
+      echo "theme[proc_box]=\"#${pal[6]}\""
+      echo "theme[div_line]=\"#${pal[8]}\""
+      echo "theme[temp_start]=\"#${pal[2]}\""
+      echo "theme[temp_mid]=\"#${pal[3]}\""
+      echo "theme[temp_end]=\"#${pal[1]}\""
+      echo "theme[cpu_start]=\"#${pal[6]}\""
+      echo "theme[cpu_mid]=\"#${pal[4]}\""
+      echo "theme[cpu_end]=\"#${pal[5]}\""
+      echo "theme[free_start]=\"#${pal[2]}\""
+      echo "theme[used_start]=\"#${pal[1]}\""
+      echo "theme[download]=\"#${pal[4]}\""
+      echo "theme[upload]=\"#${pal[5]}\""
+    } > "$bd/adrice.theme"
+    local bc="$HOME/.config/btop/btop.conf"
+    if [[ -f $bc ]]; then
+      sed -i 's|^color_theme.*|color_theme = "adrice"|' "$bc"
+      grep -q '^color_theme' "$bc" || echo 'color_theme = "adrice"' >> "$bc"
+    else
+      echo 'color_theme = "adrice"' > "$bc"
+    fi
+    done_+=(btop)
+  fi
+
+  if command -v cava >/dev/null 2>&1; then
+    local cf="$HOME/.config/cava/config"; mkdir -p "${cf%/*}"; touch "$cf"
+    sed -i '/# >>> adrice/,/# <<< adrice/d' "$cf"
+    cat >> "$cf" <<EOF
+# >>> adrice
+[color]
+gradient = 1
+gradient_count = 6
+gradient_color_1 = '#${pal[4]}'
+gradient_color_2 = '#${pal[6]}'
+gradient_color_3 = '#${pal[2]}'
+gradient_color_4 = '#${pal[3]}'
+gradient_color_5 = '#${pal[5]}'
+gradient_color_6 = '#${pal[1]}'
+# <<< adrice
+EOF
+    done_+=(cava)
+  fi
+
+  local vs="$HOME/.config/Code/User/settings.json"
+  if command -v python3 >/dev/null 2>&1 && { command -v code >/dev/null 2>&1 || [[ -f $vs ]]; }; then
+    mkdir -p "${vs%/*}"
+    if python3 - "$vs" "#$bg" "#$fg" "${pal[@]/#/#}" <<'PYEOF'
+import json, sys, os
+p, bg, fg, *pal = sys.argv[1:]
+d = {}
+if os.path.exists(p) and os.path.getsize(p) > 0:
+    try:
+        d = json.load(open(p))
+    except Exception:
+        sys.exit(1)  # settings.json has comments — refuse to touch it
+names = ["Black","Red","Green","Yellow","Blue","Magenta","Cyan","White"]
+cc = d.setdefault("workbench.colorCustomizations", {})
+cc["terminal.background"] = bg
+cc["terminal.foreground"] = fg
+for i, n in enumerate(names):
+    cc["terminal.ansi" + n] = pal[i]
+    cc["terminal.ansiBright" + n] = pal[i + 8]
+json.dump(d, open(p, "w"), indent=2)
+PYEOF
+    then done_+=("vscode terminal"); else skipped+=("vscode — settings.json has comments, skipped for safety"); fi
+  fi
+
+  if command -v spicetify >/dev/null 2>&1; then
+    local sd="$HOME/.config/spicetify/Themes/adrice"; mkdir -p "$sd"
+    cat > "$sd/color.ini" <<EOF
+[Base]
+text               = $fg
+subtext            = ${pal[7]}
+main               = $bg
+sidebar            = ${pal[0]}
+player             = $bg
+card               = ${pal[0]}
+shadow             = 000000
+selected-row       = ${pal[4]}
+button             = ${pal[4]}
+button-active      = ${pal[5]}
+button-disabled    = ${pal[8]}
+tab-active         = ${pal[4]}
+notification       = ${pal[2]}
+notification-error = ${pal[1]}
+misc               = ${pal[8]}
+EOF
+    if spicetify config current_theme adrice >/dev/null 2>&1 && spicetify apply >/dev/null 2>&1; then
+      done_+=(spicetify)
+    else
+      skipped+=("spicetify — theme written, run 'spicetify apply' manually")
+    fi
+  fi
+
+  local msg="" x
+  if (( ${#done_[@]} )); then
+    msg="${OK}✓ ${BOLD}$name${RST}${OK} synced to:${RST}"
+    for x in "${done_[@]}"; do msg+="\n  ${MUT}· $x${E39}"; done
+  else
+    msg="${WARN}⚠ none of btop/cava/vscode/spicetify found${RST}"
+  fi
+  for x in "${skipped[@]}"; do msg+="\n  ${WARN}⚠ $x${E39}"; done
+  notify "$msg"
+}
+
+# ══════════════════════════ doctor ══════════════════════════
+doctor_report(){
+  local ok="${OK}✓${E39}" warn="${WARN}⚠${E39}" t
+  printf '%s\n' "${BOLD}adrice doctor${RST}" ""
+  printf '%s\n' "${MUT}desktop${E39}  $DE_LABEL · ${XDG_SESSION_TYPE:-unknown session}"
+  if [[ ${COLORTERM:-} == *truecolor* || ${COLORTERM:-} == *24bit* ]]; then
+    printf '%s\n' "$ok truecolor terminal"
+  else
+    printf '%s\n' "$warn COLORTERM is not 'truecolor' — TUI colors may look wrong"
+  fi
+  for t in git curl unzip chafa python3; do
+    if command -v "$t" >/dev/null 2>&1; then printf '%s\n' "$ok $t"
+    else printf '%s\n' "$warn $t missing — some features limited"; fi
+  done
+  if command -v magick >/dev/null 2>&1 || command -v convert >/dev/null 2>&1; then
+    printf '%s\n' "$ok imagemagick (Wallpaper magic works)"
+  else
+    printf '%s\n' "$warn imagemagick missing — Wallpaper magic needs it"
+  fi
+  printf '%s\n' "$ok $(list_gtk_themes | wc -l) gtk themes · $(list_icon_themes | wc -l) icon themes installed"
+  if command -v fc-list >/dev/null 2>&1; then
+    if fc-list 2>/dev/null | grep -qi 'nerd'; then printf '%s\n' "$ok nerd font installed"
+    else printf '%s\n' "$warn no nerd font — starship/fastfetch icons will look broken (Get themes & fonts)"; fi
+  fi
+  if [[ $DE == gnome ]]; then
+    if gnome-extensions list 2>/dev/null | grep -q 'user-theme'; then
+      printf '%s\n' "$ok User Themes extension (shell is themable)"
+    else
+      printf '%s\n' "$warn User Themes extension missing — GNOME Shell ignores ~/.themes (GNOME Extensions → Get)"
+    fi
+    printf '%s\n' "${MUT}note${E39}  libadwaita apps ignore gtk-theme by design — they only follow dark/light + accent"
+  fi
+  if command -v flatpak >/dev/null 2>&1; then
+    if flatpak override --user --show 2>/dev/null | grep -q '.themes'; then
+      printf '%s\n' "$ok flatpak apps follow your themes"
+    else
+      printf '%s\n' "$warn flatpak apps ignore your themes — run Doctor & sync → Flatpak theme sync"
+    fi
+  fi
+}
+# interactive doctor: every ⚠ line is selectable, ⏎ runs the fix
+pkg_install(){ # PKG — leaves the TUI, runs the package manager with sudo, returns
+  local pkg=$1 mgr=""
+  if   command -v apt    >/dev/null 2>&1; then mgr="sudo apt install -y"
+  elif command -v pacman >/dev/null 2>&1; then mgr="sudo pacman -S --noconfirm"
+  elif command -v dnf    >/dev/null 2>&1; then mgr="sudo dnf install -y"
+  elif command -v zypper >/dev/null 2>&1; then mgr="sudo zypper install -y"
+  else notify "${WARN}⚠ no known package manager — install manually: $pkg${RST}"; return 1; fi
+  case "$mgr $pkg" in
+    *dnf*imagemagick)   pkg=ImageMagick ;;
+    *pacman*python3)    pkg=python ;;
+  esac
+  tui_off
+  printf '\n\033[1m→ %s %s\033[0m\n\033[2msudo will ask for your password\033[0m\n\n' "$mgr" "$pkg"
+  $mgr "$pkg" < /dev/tty
+  local rc=$?
+  printf '\npress enter to return to adrice … '
+  IFS= read -r _ < /dev/tty
+  tui_on
+  if (( rc == 0 )); then notify "${OK}✓ installed: $pkg${RST}"
+  else notify "${ERR}✗ install failed (exit $rc)${RST}"; fi
+}
+DOC_ITEMS=() DOC_ACTIONS=()
+doc_add(){ DOC_ITEMS+=("$1"); DOC_ACTIONS+=("$2"); }
+doctor_scan(){
+  DOC_ITEMS=(); DOC_ACTIONS=()
+  local fixtag="${MUT}· ⏎ fix${E39}" t
+  doc_add "${MUT}desktop  $DE_LABEL · ${XDG_SESSION_TYPE:-?}${E39}" none
+  if [[ ${COLORTERM:-} == *truecolor* || ${COLORTERM:-} == *24bit* ]]; then
+    doc_add "${OK}✓${E39} truecolor terminal" none
+  else
+    doc_add "${WARN}⚠${E39} no truecolor — use a modern terminal" none
+  fi
+  for t in git curl unzip chafa python3; do
+    if command -v "$t" >/dev/null 2>&1; then doc_add "${OK}✓${E39} $t" none
+    else doc_add "${WARN}⚠${E39} $t missing $fixtag" "pkg:$t"; fi
+  done
+  if command -v magick >/dev/null 2>&1 || command -v convert >/dev/null 2>&1; then
+    doc_add "${OK}✓${E39} imagemagick — Wallpaper magic ready" none
+  else
+    doc_add "${WARN}⚠${E39} imagemagick (Wallpaper magic) $fixtag" "pkg:imagemagick"
+  fi
+  doc_add "${OK}✓${E39} $(list_gtk_themes | wc -l) gtk themes · $(list_icon_themes | wc -l) icon themes" none
+  if command -v fc-list >/dev/null 2>&1; then
+    if fc-list 2>/dev/null | grep -qi 'nerd'; then doc_add "${OK}✓${E39} nerd font installed" none
+    else doc_add "${WARN}⚠${E39} no nerd font — prompt icons broken $fixtag" nerdfont; fi
+  fi
+  if [[ $DE == gnome ]] && command -v gnome-extensions >/dev/null 2>&1; then
+    if gnome-extensions list 2>/dev/null | grep -q 'user-theme'; then
+      doc_add "${OK}✓${E39} User Themes extension" none
+    else
+      doc_add "${WARN}⚠${E39} User Themes ext — shell not themable $fixtag" userext
+    fi
+  fi
+  [[ $DE == gnome ]] && doc_add "${MUT}note: libadwaita apps only follow dark/light + accent${E39}" none
+  if command -v flatpak >/dev/null 2>&1; then
+    if flatpak override --user --show 2>/dev/null | grep -q '.themes'; then
+      doc_add "${OK}✓${E39} flatpak follows your themes" none
+    else
+      doc_add "${WARN}⚠${E39} flatpak ignores your themes $fixtag" flatpak
+    fi
+  fi
+}
+doctor_menu(){
+  local sel=0 act c
+  while :; do
+    doctor_scan
+    MENU_START=$sel
+    menu "Doctor" "⏎ on a ⚠ line runs the fix · list refreshes after each fix" "${DOC_ITEMS[@]}" || return
+    sel=$MENU_IDX
+    act=${DOC_ACTIONS[sel]}
+    case $act in
+      none)     : ;;
+      pkg:*)    pkg_install "${act#pkg:}" ;;
+      nerdfont) for c in "${CATALOG[@]}"; do [[ $c == JetBrainsMono* ]] && { theme_install "$c"; break; }; done ;;
+      userext)  ext_install "user-theme@gnome-shell-extensions.gcampax.github.com" "User Themes"; notify "$FB" ;;
+      flatpak)  flatpak_sync ;;
+    esac
+  done
+}
+fix_menu(){
+  while :; do
+    menu "Doctor & sync" "" \
+      "Doctor ${MUT}diagnose + one-key fixes${E39}" \
+      "Flatpak theme sync ${MUT}make flatpak apps follow your rice${E39}" \
+      "Sync colors to apps ${MUT}btop · cava · VS Code · Spicetify${E39}" || return
+    local keep=$MENU_IDX
+    case $MENU_IDX in
+      0) doctor_menu ;;
+      1) flatpak_sync ;;
+      2) appsync ;;
+    esac
+    MENU_START=$keep
+  done
+}
+
+# ══════════════════════════ random rice ══════════════════════════
+random_rice(){
+  local g=() ic=() cu=() sn=() n
+  while IFS= read -r n; do g+=("$n"); done < <(list_gtk_themes)
+  while IFS= read -r n; do ic+=("$n"); done < <(list_icon_themes)
+  while IFS= read -r n; do cu+=("$n"); done < <(list_cursor_themes)
+  while IFS= read -r n; do sn+=("$n"); done < <(printf '%s\n' "${!SCHEMES[@]}")
+  local accents=(blue teal green yellow orange red pink purple)
+  local QUIET=1 sum="" t old
+  (( ${#g[@]} ))  && { old=$(current_of gtk);    t=${g[RANDOM % ${#g[@]}]};  set_gtk_theme "$t";    log_change gtk_theme "$old" "$t";    sum+="\n  ${MUT}gtk${E39}       $t"; }
+  (( ${#ic[@]} )) && { old=$(current_of icons);  t=${ic[RANDOM % ${#ic[@]}]}; set_icon_theme "$t";  log_change icon_theme "$old" "$t";   sum+="\n  ${MUT}icons${E39}     $t"; }
+  (( ${#cu[@]} )) && { old=$(current_of cursor); t=${cu[RANDOM % ${#cu[@]}]}; set_cursor_theme "$t"; log_change cursor_theme "$old" "$t"; sum+="\n  ${MUT}cursor${E39}    $t"; }
+  old=$(state_get term_scheme); t=${sn[RANDOM % ${#sn[@]}]}; apply_term_scheme "$t"; log_change term_scheme "$old" "$t"; sum+="\n  ${MUT}terminal${E39}  $t"
+  old=$(current_of accent); t=${accents[RANDOM % ${#accents[@]}]}; set_accent "$t"; log_change accent "$old" "$t"; sum+="\n  ${MUT}accent${E39}    $t"
+  QUIET=0
+  notify "${OK}✓ random rice rolled${RST}$sum\n\n${MUT}not feeling it? press u to undo piece by piece or roll again${E39}"
 }
 
 # ══════════════════════════ appearance backends ══════════════════════════
@@ -943,6 +1470,8 @@ SCHEMES[gruvbox-dark]="282828 ebdbb2 282828 cc241d 98971a d79921 458588 b16286 6
 SCHEMES[nord]="2e3440 d8dee9 3b4252 bf616a a3be8c ebcb8b 81a1c1 b48ead 88c0d0 e5e9f0 4c566a bf616a a3be8c ebcb8b 81a1c1 b48ead 8fbcbb eceff4"
 SCHEMES[tokyo-night]="1a1b26 c0caf5 15161e f7768e 9ece6a e0af68 7aa2f7 bb9af7 7dcfff a9b1d6 414868 f7768e 9ece6a e0af68 7aa2f7 bb9af7 7dcfff c0caf5"
 SCHEMES[dracula]="282a36 f8f8f2 21222c ff5555 50fa7b f1fa8c bd93f9 ff79c6 8be9fd f8f8f2 6272a4 ff6e6e 69ff94 ffffa5 d6acff ff92df a4ffff ffffff"
+# persisted wallpaper-generated scheme (see Wallpaper magic)
+[[ -f "$CONFIG_DIR/wallgen.scheme" ]] && SCHEMES[wallpaper-gen]=$(< "$CONFIG_DIR/wallgen.scheme")
 
 h2rgb(){ printf '%d,%d,%d' "0x${1:0:2}" "0x${1:2:2}" "0x${1:4:2}"; }
 
@@ -1417,20 +1946,23 @@ main_menu(){
       items+=("${C_ACC}⬡${E39} Hyprland deep config"); map+=(hypr)
     fi
     items+=(
-      "${C_MAU}⇣${E39} Get themes ${MUT}download packs${E39}"
-      "${C_PNK}❖${E39} Rice presets ${MUT}full looks, one shot${E39}"
+      "${C_PNK}★${E39} Wallpaper magic ${MUT}full theme from any image${E39}"
+      "${C_PNK}❖${E39} Rice presets ${MUT}full looks · random${E39}"
+      "${C_MAU}⇣${E39} Get themes & fonts ${MUT}download packs${E39}"
     )
-    map+=(getthemes presets)
+    map+=(magic presets getthemes)
     if [[ $DE == gnome ]]; then
       items+=("${C_ACC}⚙${E39} GNOME Extensions"); map+=(ext)
     fi
     items+=(
+      "${WARN}☀${E39} Auto day / night ${MUT}timed profiles${E39}"
+      "${OK}✚${E39} Doctor & sync ${MUT}flatpak · apps · diagnose${E39}"
       "${OK}▣${E39} Profiles ${MUT}save · apply · export${E39}"
       "${WARN}↶${E39} Undo / History"
       "${WARN}✱${E39} System info"
       "${MUT}✕ Quit${E39}"
     )
-    map+=(profiles history info quit)
+    map+=(auto fix profiles history info quit)
     HDR_MODE=big
     menu "Main" "" "${items[@]}" || { tui_off; exit 0; }
     local keep=$MENU_IDX
@@ -1440,9 +1972,12 @@ main_menu(){
       terminal)   terminal_menu ;;
       behavior)   behavior_menu ;;
       hypr)       hypr_menu ;;
+      magic)      magic_menu ;;
       getthemes)  themes_menu ;;
       presets)    preset_menu ;;
       ext)        ext_menu ;;
+      auto)       autotheme_menu ;;
+      fix)        fix_menu ;;
       profiles)   profiles_menu ;;
       history)    history_menu ;;
       info)       info_screen ;;
@@ -1477,8 +2012,22 @@ case ${1:-} in
     [[ -n ${2:-} ]] || { echo "usage: $0 export NAME" >&2; exit 1; }
     out=$(profile_export "$2") && echo "exported: $out"; exit $? ;;
   import)
-    [[ -n ${2:-} ]] || { echo "usage: $0 import FILE" >&2; exit 1; }
+    [[ -n ${2:-} ]] || { echo "usage: $0 import FILE|URL" >&2; exit 1; }
     n=$(profile_import "$2") && echo "imported as profile: $n  (activate: $0 apply $n)"; exit $? ;;
+  magic)
+    [[ -f ${2:-} ]] || { echo "usage: $0 magic IMAGE" >&2; exit 1; }
+    wallgen_build "$2" || { echo "color extraction failed — is imagemagick installed?" >&2; exit 1; }
+    QUIET=1
+    set_wallpaper "$2" >/dev/null 2>&1
+    apply_term_scheme wallpaper-gen
+    set_color_scheme dark >/dev/null 2>&1
+    set_accent "$WALLGEN_ACCENT" >/dev/null 2>&1
+    [[ $DE == hyprland ]] && hypr_apply "general:col.active_border" "rgb($WALLGEN_PRIMARY)" >/dev/null 2>&1
+    QUIET=0
+    echo "generated + applied full theme from $2 (accent: $WALLGEN_ACCENT)"
+    exit 0 ;;
+  doctor)
+    printf '%b\n' "$(doctor_report)"; exit 0 ;;
   '') [[ -t 0 && -t 1 ]] || { echo "adrice: interactive mode needs a terminal" >&2; exit 1; }
       main_menu ;;
   *)  echo "unknown command: $1 (see --help)" >&2; exit 1 ;;
