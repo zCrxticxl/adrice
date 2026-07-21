@@ -5,7 +5,7 @@
 **Rice your entire Linux desktop from one TUI.** Single file, zero hard dependencies, live previews, one-key fixes, undo for everything.
 
 [![Stars](https://img.shields.io/github/stars/zCrxticxl/adrice?style=for-the-badge&logo=github&color=7c5cff&labelColor=0b0d14)](https://github.com/zCrxticxl/adrice/stargazers)
-[![License: MIT](https://img.shields.io/github/license/zCrxticxl/adrice?style=for-the-badge&color=38bdf8&labelColor=0b0d14)](LICENSE)
+[![License](https://img.shields.io/github/license/zCrxticxl/adrice?style=for-the-badge&color=38bdf8&labelColor=0b0d14)](LICENSE)
 [![Shell](https://img.shields.io/badge/pure-bash-4EAA25?style=for-the-badge&logo=gnubash&logoColor=white&labelColor=0b0d14)](adrice.sh)
 
 ![GNOME](https://img.shields.io/badge/GNOME-4A86CF?style=flat-square&logo=gnome&logoColor=white)
@@ -87,7 +87,7 @@ Requirements: `bash` ≥ 4 + truecolor terminal. Everything else is optional —
 
 ## 📄 License
 
-MIT — see [LICENSE](LICENSE).
+Source-available for permitted non-commercial use — see [LICENSE](LICENSE). Commercial use, redistribution in paid offerings, and enterprise deployment require a separate written agreement; see [COMMERCIAL-LICENSING.md](COMMERCIAL-LICENSING.md). Security vulnerabilities must be reported privately under [SECURITY.md](SECURITY.md), not through public issues.
 
 ---
 
